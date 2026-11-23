@@ -1,0 +1,2316 @@
+// ===================== Models/IGradable.cs =====================
+namespace CourseManager.Models;
+
+public interface IGradable
+{
+    double MaxScore { get; }
+    double CalculateScore(double rawScore, bool isLate);
+}
+
+// ===================== Models/CourseActivity.cs =====================
+using System.Text.Json.Serialization;
+
+namespace CourseManager.Models;
+
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "activityType")]
+[JsonDerivedType(typeof(LabWork), "LabWork")]
+[JsonDerivedType(typeof(Assignment), "Assignment")]
+[JsonDerivedType(typeof(Quiz), "Quiz")]
+public abstract class CourseActivity : IGradable
+{
+    private string _title = string.Empty;
+    private double _maxScore;
+    private DateOnly _deadline;
+
+    protected CourseActivity()
+    {
+    }
+
+    protected CourseActivity(string title, double maxScore, DateOnly deadline)
+    {
+        Title = title;
+        MaxScore = maxScore;
+        Deadline = deadline;
+    }
+
+    public string Title
+    {
+        get => _title;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException("Назва активності не може бути порожньою.", nameof(value));
+            _title = value.Trim();
+        }
+    }
+
+    public double MaxScore
+    {
+        get => _maxScore;
+        set
+        {
+            if (value <= 0 || value > 100)
+                throw new ArgumentOutOfRangeException(nameof(value), "Максимальний бал має бути в межах від 1 до 100.");
+            _maxScore = value;
+        }
+    }
+
+    public DateOnly Deadline
+    {
+        get => _deadline;
+        set
+        {
+            if (value.Year < 2020 || value.Year > 2035)
+                throw new ArgumentOutOfRangeException(nameof(value), "Некоректна дата дедлайну.");
+            _deadline = value;
+        }
+    }
+
+    public abstract string TypeName { get; }
+
+    public abstract double CalculateScore(double rawScore, bool isLate);
+
+    // Так робота виглядає у випадаючому списку: «Лабораторна 2 (макс. 15)».
+    public override string ToString() => $"{Title} (макс. {MaxScore})";
+
+    protected void ValidateRawScore(double rawScore)
+    {
+        if (rawScore < 0 || rawScore > MaxScore)
+            throw new ArgumentOutOfRangeException(nameof(rawScore),
+                $"Оцінка {rawScore} виходить за межі [0; {MaxScore}].");
+    }
+}
+
+// ===================== Models/LabWork.cs =====================
+namespace CourseManager.Models;
+
+public sealed class LabWork : CourseActivity
+{
+    private int _defenseBonus;
+
+    public LabWork()
+    {
+    }
+
+    public LabWork(string title, double maxScore, DateOnly deadline, int defenseBonus = 0)
+        : base(title, maxScore, deadline)
+    {
+        DefenseBonus = defenseBonus;
+    }
+
+    public int DefenseBonus
+    {
+        get => _defenseBonus;
+        set
+        {
+            if (value < 0 || value > 10)
+                throw new ArgumentOutOfRangeException(nameof(value), "Бонус за захист має бути від 0 до 10.");
+            _defenseBonus = value;
+        }
+    }
+
+    public override string TypeName => "Лабораторна";
+
+    public override double CalculateScore(double rawScore, bool isLate)
+    {
+        ValidateRawScore(rawScore);
+        // Бонус за захист лише тоді, коли робота здана вчасно і має хоч якийсь бал:
+        // за нульову роботу «захищати» нічого.
+        double adjusted = isLate ? rawScore * 0.85
+            : rawScore > 0 ? rawScore + DefenseBonus
+            : 0;
+        return Math.Round(Math.Min(adjusted, MaxScore), 2);
+    }
+}
+
+// ===================== Models/Assignment.cs =====================
+namespace CourseManager.Models;
+
+public sealed class Assignment : CourseActivity
+{
+    private double _latePenaltyRate = 0.2;
+
+    public Assignment()
+    {
+    }
+
+    public Assignment(string title, double maxScore, DateOnly deadline, double latePenaltyRate = 0.2)
+        : base(title, maxScore, deadline)
+    {
+        LatePenaltyRate = latePenaltyRate;
+    }
+
+    public double LatePenaltyRate
+    {
+        get => _latePenaltyRate;
+        set
+        {
+            if (value < 0 || value > 0.5)
+                throw new ArgumentOutOfRangeException(nameof(value), "Коефіцієнт штрафу має бути в межах [0; 0.5].");
+            _latePenaltyRate = value;
+        }
+    }
+
+    public override string TypeName => "Практична";
+
+    public override double CalculateScore(double rawScore, bool isLate)
+    {
+        ValidateRawScore(rawScore);
+        double result = isLate ? rawScore * (1.0 - LatePenaltyRate) : rawScore;
+        return Math.Round(Math.Max(0, result), 2);
+    }
+}
+
+// ===================== Models/Quiz.cs =====================
+namespace CourseManager.Models;
+
+public sealed class Quiz : CourseActivity
+{
+    private int _questionsCount = 10;
+
+    public Quiz()
+    {
+    }
+
+    public Quiz(string title, double maxScore, DateOnly deadline, int questionsCount = 10)
+        : base(title, maxScore, deadline)
+    {
+        QuestionsCount = questionsCount;
+    }
+
+    public int QuestionsCount
+    {
+        get => _questionsCount;
+        set
+        {
+            if (value < 1 || value > 200)
+                throw new ArgumentOutOfRangeException(nameof(value), "Кількість питань має бути від 1 до 200.");
+            _questionsCount = value;
+        }
+    }
+
+    public override string TypeName => "Тест";
+
+    public override double CalculateScore(double rawScore, bool isLate)
+    {
+        ValidateRawScore(rawScore);
+
+        // Тест рахується за кількістю правильних відповідей: бал округлюється вниз
+        // до цілої кількості питань (10 питань на 10 балів: 7,5 → 7 правильних → 7 балів).
+        double perQuestion = MaxScore / QuestionsCount;
+        int correct = (int)Math.Floor(rawScore / perQuestion + 1e-9);
+        double result = correct * perQuestion;
+
+        if (isLate)
+            result *= 0.7;
+        return Math.Round(result, 2);
+    }
+}
+
+// ===================== Models/Course.cs =====================
+using System.ComponentModel;
+using System.Text.Json.Serialization;
+
+namespace CourseManager.Models;
+
+// INotifyPropertyChanged: після «Оновити» нова назва курсу одразу видна в таблиці та списку.
+public sealed class Course : INotifyPropertyChanged
+{
+    private string _code = string.Empty;
+    private string _title = string.Empty;
+    private string _instructor = string.Empty;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void OnChanged(string name)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DisplayName)));
+    }
+
+    // DisplayName використовується у випадному списку курсів.
+    [JsonIgnore]
+    public string DisplayName => $"{Code} – {Title}";
+
+    public Course()
+    {
+    }
+
+    public Course(string code, string title, string instructor)
+    {
+        Code = code;
+        Title = title;
+        Instructor = instructor;
+    }
+
+    public string Code
+    {
+        get => _code;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException("Код курсу не може бути порожнім.", nameof(value));
+            _code = value.Trim().ToUpperInvariant();
+            OnChanged(nameof(Code));
+        }
+    }
+
+    public string Title
+    {
+        get => _title;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException("Назва курсу не може бути порожньою.", nameof(value));
+            _title = value.Trim();
+            OnChanged(nameof(Title));
+        }
+    }
+
+    public string Instructor
+    {
+        get => _instructor;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException("Ім'я викладача не може бути порожнім.", nameof(value));
+            _instructor = value.Trim();
+            OnChanged(nameof(Instructor));
+        }
+    }
+
+    public List<CourseActivity> Activities { get; set; } = new();
+
+    // Стандартний набір робіт курсу на 100 балів:
+    // 4 лабораторні по 15 (60) + 2 практичні по 10 (20) + 2 тести по 10 (20).
+    public void AddStandardActivities(DateOnly start)
+    {
+        for (int n = 1; n <= 4; n++)
+            Activities.Add(new LabWork($"Лабораторна {n}", 15, start.AddDays(7 * n), 2));
+
+        for (int n = 1; n <= 2; n++)
+        {
+            Activities.Add(new Assignment($"Практична {n}", 10, start.AddDays(14 * n + 3), 0.15));
+            Activities.Add(new Quiz($"Тест {n}", 10, start.AddDays(14 * n + 5), 10));
+        }
+    }
+
+    public override string ToString() => DisplayName;
+}
+
+// ===================== Models/Student.cs =====================
+using System.ComponentModel;
+using System.Text.Json.Serialization;
+
+namespace CourseManager.Models;
+
+// INotifyPropertyChanged: після «Оновити» таблиця і списки одразу показують нові ПІБ і групу.
+public sealed class Student : INotifyPropertyChanged
+{
+    private string _fullName = string.Empty;
+    private string _group = string.Empty;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public Student()
+    {
+    }
+
+    public Student(string fullName, string group)
+    {
+        FullName = fullName;
+        Group = group;
+    }
+
+    public string FullName
+    {
+        get => _fullName;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException("ПІБ здобувача не може бути порожнім.", nameof(value));
+            _fullName = value.Trim();
+            OnChanged(nameof(FullName));
+        }
+    }
+
+    public string Group
+    {
+        get => _group;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException("Група не може бути порожньою.", nameof(value));
+            _group = value.Trim().ToUpperInvariant();
+            OnChanged(nameof(Group));
+        }
+    }
+
+    // DisplayName використовується у випадному списку здобувачів.
+    [JsonIgnore]
+    public string DisplayName => $"{FullName} ({Group})";
+
+    private void OnChanged(string name)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DisplayName)));
+    }
+
+    public override string ToString() => DisplayName;
+}
+
+// ===================== Models/GradeRecord.cs =====================
+namespace CourseManager.Models;
+
+public sealed class GradeRecord
+{
+    private CourseActivity _activity = null!;
+    private double _rawScore;
+
+    public GradeRecord()
+    {
+    }
+
+    public GradeRecord(CourseActivity activity, double rawScore, bool isLate)
+    {
+        Activity = activity;
+        IsLate = isLate;
+        RawScore = rawScore;
+    }
+
+    public CourseActivity Activity
+    {
+        get => _activity;
+        set => _activity = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
+    public double RawScore
+    {
+        get => _rawScore;
+        set
+        {
+            if (_activity != null && (value < 0 || value > _activity.MaxScore))
+                throw new ArgumentOutOfRangeException(nameof(value),
+                    $"Бал {value} має бути в межах [0; {_activity.MaxScore}].");
+            if (value < 0)
+                throw new ArgumentOutOfRangeException(nameof(value), "Бал не може бути від'ємним.");
+            _rawScore = value;
+        }
+    }
+
+    public bool IsLate { get; set; }
+
+    public double FinalScore => Activity.CalculateScore(RawScore, IsLate);
+}
+
+// ===================== Models/Enrollment.cs =====================
+using System.Text.Json.Serialization;
+
+namespace CourseManager.Models;
+
+public sealed class Enrollment
+{
+    private Student _student = null!;
+    private Course _course = null!;
+
+    public Enrollment()
+    {
+    }
+
+    public Enrollment(Student student, Course course)
+    {
+        Student = student;
+        Course = course;
+    }
+
+    public Student Student
+    {
+        get => _student;
+        set => _student = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
+    public Course Course
+    {
+        get => _course;
+        set => _course = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
+    public List<GradeRecord> Grades { get; set; } = new();
+
+    // Обчислювані властивості не зберігаються в JSON, а рахуються з оцінок після завантаження.
+
+    // Рейтинг за 100-бальною шкалою: сума балів за всі роботи курсу (максимум 100).
+    [JsonIgnore]
+    public double TotalRating => Math.Round(Grades.Sum(g => g.FinalScore), 2);
+
+    // Переведення рейтингу в національну шкалу.
+    [JsonIgnore]
+    public string NationalGrade => ToNationalGrade(TotalRating);
+
+    public static string ToNationalGrade(double rating) => rating switch
+    {
+        >= 90 => "Відмінно",
+        >= 74 => "Добре",
+        >= 60 => "Задовільно",
+        _ => "Незадовільно"
+    };
+
+    public GradeRecord? FindGrade(CourseActivity activity) =>
+        Grades.FirstOrDefault(g => g.Activity.Title.Equals(activity.Title, StringComparison.OrdinalIgnoreCase));
+
+    // Наступна невиконана робота: найраніший дедлайн серед робіт курсу, за які ще немає оцінки.
+    [JsonIgnore]
+    public CourseActivity? NextActivity =>
+        Course.Activities
+            .Where(a => FindGrade(a) == null)
+            .OrderBy(a => a.Deadline)
+            .FirstOrDefault();
+
+    // Для сортування: у кого все здано, той опиняється в кінці списку.
+    [JsonIgnore]
+    public DateOnly NextDeadline => NextActivity?.Deadline ?? DateOnly.MaxValue;
+
+    [JsonIgnore]
+    public string NextActivityText => NextActivity?.Title ?? "Усе здано";
+
+    [JsonIgnore]
+    public string NextActivityType => NextActivity?.TypeName ?? "Усе здано";
+
+    [JsonIgnore]
+    public string NextDeadlineText
+    {
+        get
+        {
+            var next = NextActivity;
+            if (next == null)
+                return "–";
+            bool overdue = next.Deadline < DateOnly.FromDateTime(DateTime.Today);
+            return next.Deadline.ToString("dd.MM.yyyy") + (overdue ? " (простр.)" : "");
+        }
+    }
+}
+
+// ===================== Models/StorageData.cs =====================
+namespace CourseManager.Models;
+
+public sealed class StorageData
+{
+    public List<Course> Courses { get; set; } = new();
+    public List<Student> Students { get; set; } = new();
+    public List<Enrollment> Enrollments { get; set; } = new();
+}
+
+// ===================== Models/BenchmarkResult.cs =====================
+namespace CourseManager.Models;
+
+public sealed record BenchmarkResult(
+    Dictionary<string, double> Ratings,
+    double SingleThreadMs,
+    double MultiThreadMs,
+    int ThreadCount,
+    int GradesProcessed)
+{
+    public double Speedup => MultiThreadMs > 0.001
+        ? Math.Round(SingleThreadMs / MultiThreadMs, 2)
+        : 1.0;
+}
+
+// ===================== Services/CourseService.cs =====================
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using CourseManager.Models;
+
+namespace CourseManager.Services;
+
+public sealed class CourseService
+{
+    private readonly object _syncRoot = new();
+    private readonly List<Course> _courses = new();
+    private readonly List<Student> _students = new();
+    private readonly List<Enrollment> _enrollments = new();
+
+    public IReadOnlyList<Course> Courses => _courses;
+    public IReadOnlyList<Student> Students => _students;
+    public IReadOnlyList<Enrollment> Enrollments => _enrollments;
+
+    private static bool IsSameStudent(Student a, Student b) =>
+        a.FullName.Equals(b.FullName, StringComparison.OrdinalIgnoreCase) &&
+        a.Group.Equals(b.Group, StringComparison.OrdinalIgnoreCase);
+
+    public void ReplaceAll(StorageData data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        lock (_syncRoot)
+        {
+            _courses.Clear();
+            _students.Clear();
+            _enrollments.Clear();
+
+            _courses.AddRange(data.Courses);
+            _students.AddRange(data.Students);
+            _enrollments.AddRange(data.Enrollments);
+        }
+    }
+
+    public StorageData CreateSnapshot()
+    {
+        lock (_syncRoot)
+        {
+            return new StorageData
+            {
+                Courses = new List<Course>(_courses),
+                Students = new List<Student>(_students),
+                Enrollments = new List<Enrollment>(_enrollments)
+            };
+        }
+    }
+
+    public void AddCourse(Course course)
+    {
+        ArgumentNullException.ThrowIfNull(course);
+        lock (_syncRoot)
+        {
+            if (_courses.Any(c => c.Code.Equals(course.Code, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException($"Курс із кодом {course.Code} вже існує.");
+            _courses.Add(course);
+        }
+    }
+
+    public void UpdateCourse(Course course, string newTitle, string newInstructor)
+    {
+        ArgumentNullException.ThrowIfNull(course);
+        // Спершу перевіряємо нові значення на тимчасовому об'єкті, щоб при помилці
+        // не змінити назву, а викладача залишити старого (половинчасте оновлення).
+        var checkedValues = new Course(course.Code, newTitle, newInstructor);
+        lock (_syncRoot)
+        {
+            course.Title = checkedValues.Title;
+            course.Instructor = checkedValues.Instructor;
+        }
+    }
+
+    public void DeleteCourse(Course course)
+    {
+        ArgumentNullException.ThrowIfNull(course);
+        lock (_syncRoot)
+        {
+            _courses.Remove(course);
+            _enrollments.RemoveAll(e => ReferenceEquals(e.Course, course) ||
+                                        e.Course.Code.Equals(course.Code, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    public void AddStudent(Student student)
+    {
+        ArgumentNullException.ThrowIfNull(student);
+        lock (_syncRoot)
+        {
+            if (_students.Any(s => IsSameStudent(s, student)))
+                throw new InvalidOperationException($"Здобувач {student.FullName} вже є у групі {student.Group}.");
+            _students.Add(student);
+        }
+    }
+
+    public void UpdateStudent(Student student, string newFullName, string newGroup)
+    {
+        ArgumentNullException.ThrowIfNull(student);
+        // Перевірка нових значень до зміни (порожнє ПІБ чи група не залишать запис наполовину зміненим).
+        var checkedValues = new Student(newFullName, newGroup);
+        lock (_syncRoot)
+        {
+            bool conflict = _students.Any(s => !ReferenceEquals(s, student) && IsSameStudent(s, checkedValues));
+            if (conflict)
+                throw new InvalidOperationException(
+                    $"Здобувач {checkedValues.FullName} вже є у групі {checkedValues.Group}.");
+
+            student.FullName = checkedValues.FullName;
+            student.Group = checkedValues.Group;
+        }
+    }
+
+    public void DeleteStudent(Student student)
+    {
+        ArgumentNullException.ThrowIfNull(student);
+        lock (_syncRoot)
+        {
+            _students.Remove(student);
+            _enrollments.RemoveAll(e => ReferenceEquals(e.Student, student) || IsSameStudent(e.Student, student));
+        }
+    }
+
+    public Enrollment EnrollStudent(Student student, Course course)
+    {
+        ArgumentNullException.ThrowIfNull(student);
+        ArgumentNullException.ThrowIfNull(course);
+
+        lock (_syncRoot)
+        {
+            if (!_students.Contains(student))
+                throw new InvalidOperationException($"Здобувача {student.FullName} немає у списку. Спочатку додайте його.");
+            if (!_courses.Contains(course))
+                throw new InvalidOperationException($"Курсу {course.Code} немає у списку. Спочатку додайте його.");
+
+            // Правило предметної області: здобувач навчається лише на одному курсі.
+            var existing = _enrollments.FirstOrDefault(e => IsSameStudent(e.Student, student));
+            if (existing != null)
+            {
+                if (existing.Course.Code.Equals(course.Code, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"Повторний запис заборонено: {student.FullName} ({student.Group}) вже записаний на курс {course.Code}.");
+
+                throw new InvalidOperationException(
+                    $"{student.FullName} ({student.Group}) вже навчається на курсі {existing.Course.Code}. " +
+                    "Здобувач може бути записаний лише на один курс – спочатку видаліть попередній запис.");
+            }
+
+            var enrollment = new Enrollment(student, course);
+            _enrollments.Add(enrollment);
+            return enrollment;
+        }
+    }
+
+    // Повертає true, якщо оцінку за цю роботу вже було виставлено і її замінено.
+    // За кожну роботу лише одна оцінка, тому сума не перевищує 100 балів.
+    public bool AddGrade(Enrollment enrollment, CourseActivity activity, double rawScore, bool isLate)
+    {
+        ArgumentNullException.ThrowIfNull(enrollment);
+        ArgumentNullException.ThrowIfNull(activity);
+        if (!enrollment.Course.Activities.Contains(activity))
+            throw new InvalidOperationException(
+                $"Робота «{activity.Title}» не належить курсу {enrollment.Course.Code}.");
+
+        var record = new GradeRecord(activity, rawScore, isLate);
+        lock (_syncRoot)
+        {
+            int removed = enrollment.Grades.RemoveAll(g =>
+                g.Activity.Title.Equals(activity.Title, StringComparison.OrdinalIgnoreCase));
+            enrollment.Grades.Add(record);
+            return removed > 0;
+        }
+    }
+
+    public void DeleteEnrollment(Enrollment enrollment)
+    {
+        ArgumentNullException.ThrowIfNull(enrollment);
+        lock (_syncRoot)
+        {
+            _enrollments.Remove(enrollment);
+        }
+    }
+
+    // Скільки разів повторюється кожен замір; у результат іде найкращий (найменш спотворений сторонніми процесами) час.
+    private const int MeasureRepeats = 3;
+
+    // AggressiveOptimization: метод одразу компілюється оптимізовано, тож JIT не «дооптимізовує» його
+    // посеред замірів і T1/Tn порівнюються чесно (решта програми стартує швидко зі звичайним JIT).
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static double ComputeWeightedScore(GradeRecord grade)
+    {
+        double score = grade.Activity.CalculateScore(grade.RawScore, grade.IsLate);
+
+        // Штучне навантаження (імітація складнішої формули), щоб на 15 000 оцінок
+        // один прохід тривав сотні мілісекунд, а не ~1 мс, і T1/Tn можна було порівняти.
+        // Результат циклу на бал не впливає: повертається точний score, тож рейтинг лишається в межах 0–100.
+        double load = score;
+        for (int i = 0; i < 1000; i++)
+        {
+            load = Math.Sqrt(load * load + 0.0001);
+        }
+        return load >= score ? score : load;
+    }
+
+    // Знімок під lock: копіюються не лише записи, а й масиви їхніх оцінок.
+    // Тож якщо під час розрахунку в інтерфейсі виставлять оцінку чи видалять запис,
+    // потоки працюють зі своєю копією і не отримають «Collection was modified».
+    private List<(string Key, GradeRecord[] Grades)> TakeSnapshot()
+    {
+        lock (_syncRoot)
+        {
+            return _enrollments
+                .Select(e => ($"{e.Student.FullName} ({e.Student.Group})", e.Grades.ToArray()))
+                .ToList();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static Dictionary<string, double> SumSequential(
+        List<(string Key, GradeRecord[] Grades)> snapshot, CancellationToken token)
+    {
+        var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, grades) in snapshot)
+        {
+            token.ThrowIfCancellationRequested();
+            double sum = 0;
+            foreach (var grade in grades)
+            {
+                sum += ComputeWeightedScore(grade);
+            }
+            result[key] = Math.Round(result.GetValueOrDefault(key) + sum, 2);
+        }
+        return result;
+    }
+
+    // Паралельний розрахунок: знімок ділиться на частини за кількістю потоків, кожна частина рахується
+    // у своїй задачі Task.Run у локальний словник, а потім під lock зливається в спільний.
+    private static async Task<Dictionary<string, double>> SumParallelAsync(
+        List<(string Key, GradeRecord[] Grades)> snapshot, int threads, CancellationToken token)
+    {
+        int chunkSize = Math.Max(1, (int)Math.Ceiling(snapshot.Count / (double)threads));
+        var merged = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        var mergeLock = new object();
+
+        var tasks = new List<Task>();
+        for (int i = 0; i < snapshot.Count; i += chunkSize)
+        {
+            var chunk = snapshot.GetRange(i, Math.Min(chunkSize, snapshot.Count - i));
+            tasks.Add(Task.Run(() =>
+            {
+                var local = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (key, grades) in chunk)
+                {
+                    token.ThrowIfCancellationRequested();
+                    double sum = 0;
+                    foreach (var grade in grades)
+                    {
+                        sum += ComputeWeightedScore(grade);
+                    }
+                    local[key] = local.GetValueOrDefault(key) + sum;
+                }
+
+                lock (mergeLock)
+                {
+                    foreach (var pair in local)
+                    {
+                        merged[pair.Key] = Math.Round(merged.GetValueOrDefault(pair.Key) + pair.Value, 2);
+                    }
+                }
+            }, token));
+        }
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+        return merged;
+    }
+
+    public Dictionary<string, double> CalculateRatingsSequential(CancellationToken token) =>
+        SumSequential(TakeSnapshot(), token);
+
+    public async Task<BenchmarkResult> CalculateRatingsBenchmarkAsync(
+        IProgress<double>? progress,
+        CancellationToken token)
+    {
+        // Обидва заміри працюють з одним і тим самим знімком, тому порівняння T1 і Tn чесне.
+        var snapshot = TakeSnapshot();
+        int totalGrades = snapshot.Sum(e => e.Grades.Length);
+        int threads = Math.Max(2, Environment.ProcessorCount);
+
+        // Кроків: прогрів + MeasureRepeats замірів T1 + MeasureRepeats замірів Tn.
+        int totalSteps = 1 + 2 * MeasureRepeats, step = 0;
+        void Step() => progress?.Report((double)++step / totalSteps);
+
+        // Прогрів (без заміру) обох варіантів: JIT-компіляція і запуск потоків пулу не потрапляють у T1/Tn.
+        // Без цього T1 був завищений, і прискорення S виходило більшим за кількість ядер, чого не буває.
+        await Task.Run(() => SumSequential(snapshot, token), token).ConfigureAwait(false);
+        await SumParallelAsync(snapshot, threads, token).ConfigureAwait(false);
+        Step();
+
+        // T1: один фоновий потік (не потік інтерфейсу, щоб вікно не «зависало»).
+        // ConfigureAwait(false) – щоб у заміри не потрапляв час очікування потоку інтерфейсу.
+        double bestSingle = double.MaxValue;
+        for (int r = 0; r < MeasureRepeats; r++)
+        {
+            var sw = Stopwatch.StartNew();
+            await Task.Run(() => SumSequential(snapshot, token), token).ConfigureAwait(false);
+            sw.Stop();
+            bestSingle = Math.Min(bestSingle, sw.Elapsed.TotalMilliseconds);
+            Step();
+        }
+
+        // Tn: threads задач паралельно.
+        double bestMulti = double.MaxValue;
+        Dictionary<string, double> ratings = new();
+        for (int r = 0; r < MeasureRepeats; r++)
+        {
+            var sw = Stopwatch.StartNew();
+            ratings = await SumParallelAsync(snapshot, threads, token).ConfigureAwait(false);
+            sw.Stop();
+            bestMulti = Math.Min(bestMulti, sw.Elapsed.TotalMilliseconds);
+            Step();
+        }
+
+        return new BenchmarkResult(
+            ratings,
+            Math.Round(bestSingle, 2),
+            Math.Round(bestMulti, 2),
+            threads,
+            totalGrades);
+    }
+}
+
+// ===================== Services/DataGenerator.cs =====================
+using CourseManager.Models;
+
+namespace CourseManager.Services;
+
+public sealed class DataGenerator
+{
+    private const int Seed = 2026;
+    private const int MaxGradesLimit = 500_000;
+
+    private static readonly string[] Groups = ["3РП-11", "2РП-12", "3КІ-21", "2КІ-22"];
+
+    private static readonly string[] FirstNames =
+    [
+        "Дмитро", "Олександр", "Максим", "Артем", "Богдан", "Андрій", "Владислав", "Денис", "Євген", "Ілля",
+        "Кирило", "Назар", "Олег", "Роман", "Тарас", "Ярослав", "Іван", "Микола", "Сергій", "Віталій",
+        "Анна", "Марія", "Софія", "Дарія", "Вікторія", "Аліна", "Валерія", "Діана", "Єлизавета", "Ірина",
+        "Катерина", "Мирослава", "Олена", "Поліна", "Юлія", "Яна", "Христина", "Оксана", "Тетяна", "Анастасія"
+    ];
+
+    // Прізвища без родової форми (-енко, -ук, -ар тощо), щоб пасували і хлопцям, і дівчатам.
+    private static readonly string[] LastNames =
+    [
+        "Шевченко", "Бондар", "Ткаченко", "Мельник", "Кравченко", "Олійник", "Поліщук", "Савченко", "Коваленко", "Бойко",
+        "Марченко", "Руденко", "Литвиненко", "Гончаренко", "Сидоренко", "Петренко", "Кушнір", "Гребенюк", "Мороз", "Павлюк",
+        "Захарчук", "Козак", "Левченко", "Демчук", "Остапчук", "Романюк", "Федоренко", "Яковенко", "Климчук", "Тимошенко",
+        "Харченко", "Лук'яненко", "Мартинюк", "Головко", "Дячук", "Пономаренко", "Вакуленко", "Сорока", "Кулик", "Нестеренко",
+        "Карпенко", "Онищенко", "Гуменюк", "Мирошниченко", "Степанюк", "Білик", "Ковальчук", "Шульга", "Приходько", "Власенко"
+    ];
+
+    // leaveDebts = true: частина робіт залишається без оцінки (борги), як посеред семестру.
+    // Здобувачі додаються, доки оцінок не стане рівно targetGradesCount, тож з боргами їх просто більше.
+    public StorageData Generate(int targetGradesCount, bool leaveDebts = false)
+    {
+        if (targetGradesCount < 1 || targetGradesCount > MaxGradesLimit)
+            throw new ArgumentOutOfRangeException(nameof(targetGradesCount),
+                $"Кількість оцінок має бути від 1 до {MaxGradesLimit}.");
+
+        // Усі курси мають однаковий набір із 8 робіт, тож здобувач без боргів = 8 оцінок.
+        // З боргами оцінок у середньому менше, тому здобувачів дозволяємо із запасом (удвічі більше).
+        int maxStudents = (int)Math.Ceiling(targetGradesCount / 8.0) * (leaveDebts ? 2 : 1);
+        return Build(maxStudents, targetGradesCount, leaveDebts);
+    }
+
+    // Стартовий набір: рівно studentCount здобувачів, частина робіт ще без оцінки.
+    public StorageData GenerateStartSet(int studentCount)
+    {
+        if (studentCount < 1 || studentCount > MaxGradesLimit / 8)
+            throw new ArgumentOutOfRangeException(nameof(studentCount));
+        return Build(studentCount, int.MaxValue, leaveDebts: true);
+    }
+
+    private static StorageData Build(int maxStudents, int targetGradesCount, bool leaveDebts)
+    {
+        var rnd = new Random(Seed);
+        var data = new StorageData();
+
+        var courses = new List<Course>
+        {
+            new("OOP-301", "Об'єктно-орієнтоване програмування", "Стогул В. М."),
+            new("DB-204", "Бази даних та SQL", "Коваленко І. П."),
+            new("WEB-310", "Веб-розробка", "Ткачук О. В."),
+            new("ALG-105", "Алгоритми і структури даних", "Мороз С. А."),
+            new("NET-215", "Комп'ютерні мережі", "Лисенко Н. М.")
+        };
+
+        var baseDate = new DateOnly(2026, 11, 1);
+        foreach (var course in courses)
+        {
+            course.AddStandardActivities(baseDate);
+            data.Courses.Add(course);
+        }
+
+        var names = BuildUniqueNames(maxStudents, rnd);
+        int gradesCreated = 0;
+
+        for (int i = 0; i < maxStudents && gradesCreated < targetGradesCount; i++)
+        {
+            var student = new Student(names[i], Groups[i % Groups.Length]);
+            data.Students.Add(student);
+
+            // Один здобувач – один курс. 4 групи і 5 курсів дають усі поєднання «група – курс».
+            var course = courses[i % courses.Count];
+            var enrollment = new Enrollment(student, course);
+
+            // «Рівень» здобувача від 0,45 до 1,0: сильні отримують високі бали за всі роботи, слабкі – низькі.
+            double level = 0.45 + 0.55 * rnd.NextDouble();
+
+            foreach (var activity in course.Activities)
+            {
+                if (gradesCreated >= targetGradesCount)
+                    break;
+
+                // Сильні здобувачі (рівень від 0,86) здають усе, слабші пропускають до 30 % робіт.
+                if (leaveDebts && rnd.NextDouble() > Math.Min(1.0, 0.4 + 0.7 * level))
+                    continue;
+
+                double share = Math.Clamp(level + (rnd.NextDouble() - 0.5) * 0.3, 0, 1);
+                double raw = Math.Round(share * activity.MaxScore, 1);
+                bool late = rnd.Next(6) == 0;
+                enrollment.Grades.Add(new GradeRecord(activity, raw, late));
+                gradesCreated++;
+            }
+
+            data.Enrollments.Add(enrollment);
+        }
+
+        if (targetGradesCount != int.MaxValue && gradesCreated < targetGradesCount)
+            throw new InvalidOperationException($"Вдалося згенерувати лише {gradesCreated} оцінок із {targetGradesCount}.");
+
+        return data;
+    }
+
+    // Перемішує всі пари «прізвище + ім'я» (2000 штук) і бере потрібну кількість, тож імена не повторюються.
+    // Якщо здобувачів більше, ніж пар, до імені додається ініціал по батькові.
+    private static List<string> BuildUniqueNames(int count, Random rnd)
+    {
+        var pairs = new List<string>(LastNames.Length * FirstNames.Length);
+        foreach (var last in LastNames)
+            foreach (var first in FirstNames)
+                pairs.Add($"{last} {first}");
+
+        for (int i = pairs.Count - 1; i > 0; i--)
+        {
+            int j = rnd.Next(i + 1);
+            (pairs[i], pairs[j]) = (pairs[j], pairs[i]);
+        }
+
+        const string initials = "АБВГДЄІКЛМНОПРСТФЮ";
+        var result = new List<string>(count);
+        for (int i = 0; i < count; i++)
+        {
+            string name = pairs[i % pairs.Count];
+            int round = i / pairs.Count;
+            if (round > 0)
+                name += $" {initials[(round - 1) % initials.Length]}.";
+            if (round > initials.Length)
+                name += $" ({round / initials.Length + 1})";
+            result.Add(name);
+        }
+
+        return result;
+    }
+}
+
+// ===================== Repositories/JsonStorage.cs =====================
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using CourseManager.Models;
+using Serilog;
+
+namespace CourseManager.Repositories;
+
+public sealed class JsonStorage
+{
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    public void Save(string path, StorageData data)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(data);
+
+        string tempPath = path + ".tmp";
+        string json = JsonSerializer.Serialize(data, Options);
+        File.WriteAllText(tempPath, json);
+        File.Move(tempPath, path, overwrite: true);
+        Log.Information("Збережено дані у {Path}: {Courses} курсів, {Enrollments} записів",
+            path, data.Courses.Count, data.Enrollments.Count);
+    }
+
+    public StorageData Load(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"Файл не знайдено: {path}", path);
+
+        try
+        {
+            string json = File.ReadAllText(path);
+            var data = JsonSerializer.Deserialize<StorageData>(json, Options)
+                ?? throw new IOException("Файл не відповідає формату JSON застосунку.");
+
+            ValidateAndLink(data);
+            Log.Information("Завантажено дані з {Path}: {Courses} курсів, {Enrollments} записів",
+                path, data.Courses.Count, data.Enrollments.Count);
+            return data;
+        }
+        catch (JsonException ex)
+        {
+            Log.Warning(ex, "Пошкоджений JSON у файлі {Path}", path);
+            throw new IOException($"Файл не відповідає формату JSON застосунку: {ex.Message}", ex);
+        }
+    }
+
+    private static void ValidateAndLink(StorageData data)
+    {
+        var courseMap = new Dictionary<string, Course>(StringComparer.OrdinalIgnoreCase);
+        foreach (var course in data.Courses)
+        {
+            if (!courseMap.TryAdd(course.Code, course))
+                throw new InvalidOperationException($"У файлі курс {course.Code} записано двічі.");
+        }
+
+        var studentMap = new Dictionary<string, Student>(StringComparer.OrdinalIgnoreCase);
+        foreach (var student in data.Students)
+        {
+            string sKey = $"{student.FullName}|{student.Group}";
+            if (!studentMap.TryAdd(sKey, student))
+                throw new InvalidOperationException(
+                    $"У файлі здобувач {student.FullName} ({student.Group}) записаний двічі.");
+        }
+
+        // ПІБ|група -> код курсу: здобувач може бути записаний лише на один курс.
+        var studentCourse = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var enrollment in data.Enrollments)
+        {
+            if (enrollment.Student == null || enrollment.Course == null)
+                throw new IOException("Запис на курс не містить даних про здобувача або курс.");
+
+            string sKey = $"{enrollment.Student.FullName}|{enrollment.Student.Group}";
+            if (studentMap.TryGetValue(sKey, out var realStudent))
+            {
+                enrollment.Student = realStudent;
+            }
+            else
+            {
+                studentMap[sKey] = enrollment.Student;
+                data.Students.Add(enrollment.Student);
+            }
+
+            if (courseMap.TryGetValue(enrollment.Course.Code, out var realCourse))
+            {
+                enrollment.Course = realCourse;
+            }
+            else
+            {
+                courseMap[enrollment.Course.Code] = enrollment.Course;
+                data.Courses.Add(enrollment.Course);
+            }
+
+            if (studentCourse.TryGetValue(sKey, out var firstCourse))
+            {
+                string who = $"{enrollment.Student.FullName} ({enrollment.Student.Group})";
+                if (firstCourse.Equals(enrollment.Course.Code, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"У файлі виявлено повторний запис: {who} на курс {enrollment.Course.Code}.");
+
+                throw new InvalidOperationException(
+                    $"У файлі {who} записаний на два курси ({firstCourse} і {enrollment.Course.Code}), а дозволено лише один.");
+            }
+            studentCourse[sKey] = enrollment.Course.Code;
+
+            var activityMap = new Dictionary<string, CourseActivity>(StringComparer.OrdinalIgnoreCase);
+            foreach (var act in enrollment.Course.Activities)
+            {
+                activityMap[act.Title] = act;
+            }
+
+            var gradedTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var grade in enrollment.Grades)
+            {
+                if (grade.Activity == null)
+                    throw new IOException("Оцінка не прив'язана до активності курсу.");
+
+                // За кожну роботу одна оцінка, інакше рейтинг може перевищити 100.
+                if (!gradedTitles.Add(grade.Activity.Title))
+                    throw new InvalidOperationException(
+                        $"У файлі {enrollment.Student.FullName} має дві оцінки за «{grade.Activity.Title}».");
+
+                if (activityMap.TryGetValue(grade.Activity.Title, out var realActivity))
+                {
+                    grade.Activity = realActivity;
+                }
+                else
+                {
+                    activityMap[grade.Activity.Title] = grade.Activity;
+                    enrollment.Course.Activities.Add(grade.Activity);
+                }
+
+                if (grade.RawScore < 0 || grade.RawScore > grade.Activity.MaxScore)
+                    throw new ArgumentOutOfRangeException(nameof(grade.RawScore),
+                        $"Некоректний бал {grade.RawScore} для активності {grade.Activity.Title} (макс. {grade.Activity.MaxScore}).");
+            }
+        }
+    }
+}
+
+// ===================== Repositories/XmlReportExporter.cs =====================
+using System.Text;
+using System.Xml.Serialization;
+using CourseManager.Models;
+using Serilog;
+
+namespace CourseManager.Repositories;
+
+[XmlRoot("CourseGradeSheet")]
+public sealed class CourseGradeSheetDto
+{
+    [XmlAttribute("generatedAt")]
+    public string GeneratedAt { get; set; } = string.Empty;
+
+    [XmlElement("Course")]
+    public List<CourseSheetDto> Courses { get; set; } = new();
+}
+
+public sealed class CourseSheetDto
+{
+    [XmlAttribute("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [XmlAttribute("title")]
+    public string Title { get; set; } = string.Empty;
+
+    [XmlAttribute("instructor")]
+    public string Instructor { get; set; } = string.Empty;
+
+    [XmlElement("StudentEntry")]
+    public List<StudentRatingDto> Entries { get; set; } = new();
+}
+
+public sealed class StudentRatingDto
+{
+    [XmlElement("FullName")]
+    public string FullName { get; set; } = string.Empty;
+
+    [XmlElement("Group")]
+    public string Group { get; set; } = string.Empty;
+
+    [XmlElement("Rating")]
+    public double Rating { get; set; }
+
+    [XmlElement("Grade")]
+    public string Grade { get; set; } = string.Empty;
+}
+
+public sealed class XmlReportExporter
+{
+    public void Export(string path, Dictionary<string, double> ratings, IEnumerable<Enrollment> enrollments)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(ratings);
+        ArgumentNullException.ThrowIfNull(enrollments);
+
+        var dto = new CourseGradeSheetDto
+        {
+            GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+            Courses = enrollments
+                .GroupBy(e => e.Course)
+                .OrderBy(g => g.Key.Code)
+                .Select(g => new CourseSheetDto
+                {
+                    Code = g.Key.Code,
+                    Title = g.Key.Title,
+                    Instructor = g.Key.Instructor,
+                    Entries = g
+                        .Select(e =>
+                        {
+                            // Рейтинг береться з результату багатопотокового розрахунку (ключ «ПІБ (група)»).
+                            string key = $"{e.Student.FullName} ({e.Student.Group})";
+                            double rating = ratings.TryGetValue(key, out var r) ? r : e.TotalRating;
+                            return new StudentRatingDto
+                            {
+                                FullName = e.Student.FullName,
+                                Group = e.Student.Group,
+                                Rating = rating,
+                                Grade = Enrollment.ToNationalGrade(rating)
+                            };
+                        })
+                        .OrderByDescending(x => x.Rating)
+                        .ThenBy(x => x.FullName)
+                        .ToList()
+                })
+                .ToList()
+        };
+
+        var serializer = new XmlSerializer(typeof(CourseGradeSheetDto));
+        using var writer = new StreamWriter(path, false, new UTF8Encoding(false));
+        serializer.Serialize(writer, dto);
+        Log.Information("Експортовано XML-відомість у {Path} ({Courses} курсів, {Count} здобувачів)",
+            path, dto.Courses.Count, dto.Courses.Sum(c => c.Entries.Count));
+    }
+}
+
+// ===================== ViewModels/MainWindowViewModel.cs =====================
+using System.Collections.ObjectModel;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using CourseManager.Models;
+using CourseManager.Repositories;
+using CourseManager.Services;
+using Serilog;
+
+namespace CourseManager.ViewModels;
+
+public partial class MainWindowViewModel : ObservableObject
+{
+    private const string DefaultJsonPath = "courses.json";
+    private const string DefaultXmlPath = "course_grade_sheet.xml";
+
+    private readonly CourseService _service = new();
+    private readonly JsonStorage _storage = new();
+    private readonly XmlReportExporter _xmlExporter = new();
+    private readonly DataGenerator _generator = new();
+    private CancellationTokenSource? _cts;
+
+    public ObservableCollection<Enrollment> FilteredEnrollments { get; } = new();
+    public ObservableCollection<Course> Courses { get; } = new();
+    public ObservableCollection<Student> Students { get; } = new();
+    public ObservableCollection<CourseActivity> SelectedEnrollmentActivities { get; } = new();
+
+    // Список груп будується з наявних здобувачів, тож нова група (наприклад, 4РП-11) теж з'явиться у фільтрі.
+    public ObservableCollection<string> GroupFilters { get; } = ["Усі"];
+    // Фільтр за типом наступної невиконаної роботи.
+    public IReadOnlyList<string> ActivityFilters { get; } = ["Усі", "Лабораторна", "Практична", "Тест", "Усе здано"];
+    public IReadOnlyList<string> SortModes { get; } = ["Рейтинг (спадання)", "Рейтинг (зростання)", "Наступний дедлайн"];
+
+    // View передає сюди показ вікна «Так / Скасувати». Без View (наприклад, у тестах) дія підтверджується.
+    public Func<string, Task<bool>>? Confirm { get; set; }
+
+    [ObservableProperty] private string _searchQuery = string.Empty;
+    [ObservableProperty] private string _selectedGroupFilter = "Усі";
+    [ObservableProperty] private string _selectedActivityFilter = "Усі";
+    [ObservableProperty] private string _selectedSortMode = "Рейтинг (спадання)";
+    [ObservableProperty] private string _statusText = "Готово до роботи";
+    [ObservableProperty] private double _progressValue;
+    [ObservableProperty] private bool _isBusy;
+    [ObservableProperty] private string _shownInfo = string.Empty;
+
+    [ObservableProperty] private string _newCourseCode = string.Empty;
+    [ObservableProperty] private string _newCourseTitle = string.Empty;
+    [ObservableProperty] private string _newCourseInstructor = string.Empty;
+
+    [ObservableProperty] private string _newStudentName = string.Empty;
+    [ObservableProperty] private string _newStudentGroup = "3РП-11";
+
+    [ObservableProperty] private Course? _selectedCourse;
+    [ObservableProperty] private Student? _selectedStudent;
+    [ObservableProperty] private Enrollment? _selectedEnrollment;
+
+    [ObservableProperty] private CourseActivity? _selectedActivity;
+    [ObservableProperty] private string _gradeRawScoreText = string.Empty;
+    [ObservableProperty] private bool _gradeIsLate;
+    [ObservableProperty] private string _gradeHint = NoRowHint;
+
+    // Один шлях і для імпорту, і для експорту JSON.
+    [ObservableProperty] private string _jsonFilePath = DefaultJsonPath;
+
+    private const string NoRowHint = "Оберіть рядок у таблиці, щоб виставити оцінку.";
+
+    public MainWindowViewModel()
+    {
+        InitializeStartupData();
+    }
+
+    partial void OnSearchQueryChanged(string value) => RefreshView();
+    partial void OnSelectedGroupFilterChanged(string value)
+    {
+        // Коли список груп оновлюється, ComboBox на мить скидає вибір у null – повертаємо «Усі».
+        if (value == null)
+        {
+            SelectedGroupFilter = "Усі";
+            return;
+        }
+        RefreshView();
+    }
+    partial void OnSelectedActivityFilterChanged(string value) => RefreshView();
+    partial void OnSelectedSortModeChanged(string value) => RefreshView();
+
+    partial void OnSelectedCourseChanged(Course? value)
+    {
+        if (value == null) return;
+        NewCourseCode = value.Code;
+        NewCourseTitle = value.Title;
+        NewCourseInstructor = value.Instructor;
+    }
+
+    partial void OnSelectedStudentChanged(Student? value)
+    {
+        if (value == null) return;
+        NewStudentName = value.FullName;
+        NewStudentGroup = value.Group;
+    }
+
+    // Клік по рядку таблиці також обирає його здобувача і курс у правій панелі,
+    // тож одразу можна змінити ПІБ чи назву курсу і натиснути «Оновити».
+    partial void OnSelectedEnrollmentChanged(Enrollment? value)
+    {
+        // Під час перезаповнення таблиці рядок лише повертається на місце – поля праворуч не чіпаємо.
+        if (value != null && !_restoringSelection)
+        {
+            SelectedStudent = value.Student;
+            SelectedCourse = value.Course;
+        }
+        FillActivities();
+    }
+
+    partial void OnSelectedActivityChanged(CourseActivity? value) => UpdateGradeHint();
+
+    // Список робіт курсу обраного рядка; одразу пропонується наступна невиконана робота.
+    private void FillActivities()
+    {
+        SelectedEnrollmentActivities.Clear();
+        var enrollment = SelectedEnrollment;
+        if (enrollment == null)
+        {
+            SelectedActivity = null;
+            UpdateGradeHint();
+            return;
+        }
+
+        foreach (var act in enrollment.Course.Activities.OrderBy(a => a.Deadline))
+        {
+            SelectedEnrollmentActivities.Add(act);
+        }
+        SelectedActivity = enrollment.NextActivity ?? SelectedEnrollmentActivities.FirstOrDefault();
+        UpdateGradeHint();
+    }
+
+    private void UpdateGradeHint()
+    {
+        var enrollment = SelectedEnrollment;
+        var activity = SelectedActivity;
+        if (enrollment == null)
+        {
+            GradeHint = NoRowHint;
+            return;
+        }
+
+        string who = enrollment.Student.FullName;
+        if (activity == null)
+        {
+            GradeHint = $"{who}: оберіть роботу зі списку.";
+            return;
+        }
+
+        var grade = enrollment.FindGrade(activity);
+        GradeHint = grade == null
+            ? $"{who} – {activity.Title}: ще не оцінено, дедлайн {activity.Deadline:dd.MM.yyyy}."
+            : $"{who} – {activity.Title}: зараз {grade.RawScore} з {activity.MaxScore}" +
+              (grade.IsLate ? " (із запізненням)" : "") + ". Нова оцінка замінить її.";
+    }
+
+    private Task<bool> AskAsync(string message) => Confirm?.Invoke(message) ?? Task.FromResult(true);
+
+    // Обраний у списку здобувач береться, якщо ПІБ у полі не змінювали (або це перейменування при «Оновити»).
+    // Якщо в полі інше ПІБ – шукаємо саме його, щоб «Видалити» чи «Записати» не зачепили не того здобувача.
+    // Група потрібна лише тоді, коли є кілька здобувачів з однаковим ПІБ.
+    private Student? FindStudent(string name, string group, bool renaming = false)
+    {
+        name = name.Trim();
+        var selected = SelectedStudent;
+        if (selected != null &&
+            (renaming || name.Length == 0 || selected.FullName.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            return selected;
+
+        if (name.Length == 0)
+        {
+            StatusText = "Оберіть здобувача зі списку або введіть його ПІБ.";
+            return null;
+        }
+
+        var byName = _service.Students
+            .Where(s => s.FullName.Equals(name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (byName.Count == 1)
+            return byName[0];
+
+        var exact = byName.FirstOrDefault(s => s.Group.Equals(group.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (exact != null)
+            return exact;
+
+        StatusText = byName.Count == 0
+            ? $"Здобувача «{name}» не знайдено. Оберіть його зі списку або натисніть «Додати»."
+            : $"Є кілька здобувачів «{name}». Вкажіть групу або оберіть потрібного зі списку.";
+        return null;
+    }
+
+    // Обраний у списку курс, якщо код у полі збігається з ним; інакше – пошук за введеним кодом.
+    private Course? FindCourse(string code)
+    {
+        code = code.Trim();
+        var selected = SelectedCourse;
+        if (selected != null && (code.Length == 0 || selected.Code.Equals(code, StringComparison.OrdinalIgnoreCase)))
+            return selected;
+
+        if (code.Length == 0)
+        {
+            StatusText = "Оберіть курс зі списку або введіть його код.";
+            return null;
+        }
+
+        var course = _service.Courses.FirstOrDefault(c => c.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        if (course == null)
+        {
+            StatusText = selected != null
+                ? $"Курс {code.ToUpperInvariant()} не знайдено. Код курсу змінити не можна: щоб змінити назву чи викладача, залиште код {selected.Code}."
+                : $"Курс із кодом {code.ToUpperInvariant()} не знайдено. Оберіть його зі списку або натисніть «Додати».";
+        }
+        return course;
+    }
+
+    private const int StartStudents = 100;
+
+    private void InitializeStartupData()
+    {
+        try
+        {
+            StorageData data;
+            if (File.Exists(DefaultJsonPath))
+            {
+                data = _storage.Load(DefaultJsonPath);
+            }
+            else
+            {
+                // 100 здобувачів × 8 робіт (по 25 у кожній із 4 груп, по 20 на кожному курсі),
+                // частина робіт ще не здана, щоб було видно наступні дедлайни і борги.
+                data = _generator.GenerateStartSet(StartStudents);
+                _storage.Save(DefaultJsonPath, data);
+            }
+
+            _service.ReplaceAll(data);
+            RefreshCollections();
+            StatusText = $"Завантажено {_service.Enrollments.Count} записів ({_service.Courses.Count} курсів).";
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Помилка стартового завантаження даних");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void AddCourse()
+    {
+        try
+        {
+            var course = new Course(NewCourseCode, NewCourseTitle, NewCourseInstructor);
+            course.AddStandardActivities(DateOnly.FromDateTime(DateTime.Today));
+            _service.AddCourse(course);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            SelectedCourse = course;
+            StatusText = $"Курс {course.Code} додано й обрано.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка додавання курсу");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void UpdateCourse()
+    {
+        string title = NewCourseTitle, instructor = NewCourseInstructor;
+        var course = FindCourse(NewCourseCode);
+        if (course == null) return;
+
+        try
+        {
+            _service.UpdateCourse(course, title, instructor);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            StatusText = $"Курс {course.Code} оновлено.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка оновлення курсу");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task DeleteCourseAsync()
+    {
+        var course = FindCourse(NewCourseCode);
+        if (course == null) return;
+
+        int linked = _service.Enrollments.Count(e => ReferenceEquals(e.Course, course));
+        if (!await AskAsync($"Видалити курс {course.Code} «{course.Title}»?\n\n" +
+                            $"Разом із ним буде видалено {linked} записів здобувачів на цей курс і всі їхні оцінки."))
+        {
+            StatusText = "Видалення курсу скасовано.";
+            return;
+        }
+
+        try
+        {
+            _service.DeleteCourse(course);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            NewCourseCode = NewCourseTitle = NewCourseInstructor = string.Empty;
+            StatusText = $"Курс {course.Code} та пов'язані записи видалено.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка видалення курсу");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void AddStudent()
+    {
+        try
+        {
+            var student = new Student(NewStudentName, NewStudentGroup);
+            _service.AddStudent(student);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            SelectedStudent = student;
+            // У таблиці показуються записи на курси, тому новий здобувач з'явиться там лише після запису.
+            StatusText = $"Здобувача {student.FullName} ({student.Group}) додано й обрано. Щоб він з'явився в таблиці, " +
+                         "оберіть курс і натисніть «Записати».";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка додавання здобувача");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void UpdateStudent()
+    {
+        // Без вибору у списку здобувача шукаємо за ПІБ, а нову групу беремо з поля «Група».
+        string name = NewStudentName, group = NewStudentGroup;
+        var student = FindStudent(name, group, renaming: true);
+        if (student == null) return;
+
+        try
+        {
+            _service.UpdateStudent(student, name, group);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            StatusText = $"Дані здобувача {student.FullName} ({student.Group}) оновлено.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка оновлення здобувача");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task DeleteStudentAsync()
+    {
+        var student = FindStudent(NewStudentName, NewStudentGroup);
+        if (student == null) return;
+
+        if (!await AskAsync($"Видалити здобувача {student.FullName} ({student.Group})?\n\n" +
+                            "Його запис на курс і всі оцінки також буде видалено."))
+        {
+            StatusText = "Видалення здобувача скасовано.";
+            return;
+        }
+
+        try
+        {
+            _service.DeleteStudent(student);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            NewStudentName = string.Empty;
+            StatusText = $"Здобувача {student.FullName} ({student.Group}) та його записи видалено.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка видалення здобувача");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void EnrollSelected()
+    {
+        var student = FindStudent(NewStudentName, NewStudentGroup);
+        if (student == null) return;
+        var course = FindCourse(NewCourseCode);
+        if (course == null) return;
+
+        try
+        {
+            var enrollment = _service.EnrollStudent(student, course);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            // Новий запис одразу виділяємо в таблиці (якщо його не приховує фільтр), щоб можна було виставити оцінку.
+            bool visible = FilteredEnrollments.Contains(enrollment);
+            if (visible) SelectedEnrollment = enrollment;
+            StatusText = $"{student.FullName} записано на курс {course.Code}." +
+                         (visible ? " Запис виділено в таблиці – можна виставляти оцінки."
+                                  : " Запис приховано пошуком чи фільтром.");
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка запису на курс");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void AddGradeToSelected()
+    {
+        var enrollment = SelectedEnrollment;
+        var activity = SelectedActivity;
+        if (enrollment == null)
+        {
+            StatusText = NoRowHint;
+            return;
+        }
+        if (activity == null)
+        {
+            StatusText = "Оберіть роботу зі списку.";
+            return;
+        }
+
+        if (!double.TryParse(GradeRawScoreText.Trim().Replace(',', '.'),
+                System.Globalization.CultureInfo.InvariantCulture, out double rawScore))
+        {
+            StatusText = $"Помилка: введіть бал числом від 0 до {activity.MaxScore}.";
+            return;
+        }
+
+        try
+        {
+            bool replaced = _service.AddGrade(enrollment, activity, rawScore, GradeIsLate);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshView();
+            GradeRawScoreText = string.Empty;
+            GradeIsLate = false;
+
+            // Рядок лишається обраним (якщо він не зник через фільтр), а у списку стає наступна невиконана робота.
+            if (SelectedEnrollment == enrollment)
+                FillActivities();
+
+            StatusText = (replaced
+                    ? $"Оцінку за {activity.Title} змінено на {rawScore}."
+                    : $"Оцінку {rawScore} за {activity.Title} додано.") +
+                $" {enrollment.Student.FullName}: рейтинг {enrollment.TotalRating} ({enrollment.NationalGrade}).";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка додавання оцінки");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task DeleteSelectedEnrollmentAsync()
+    {
+        var enrollment = SelectedEnrollment;
+        if (enrollment == null)
+        {
+            StatusText = "Оберіть у таблиці рядок, який треба видалити.";
+            return;
+        }
+
+        if (!await AskAsync($"Зняти {enrollment.Student.FullName} з курсу {enrollment.Course.Code}?\n\n" +
+                            $"Буде видалено {enrollment.Grades.Count} оцінок. Сам здобувач залишиться і його можна записати на інший курс."))
+        {
+            StatusText = "Видалення запису скасовано.";
+            return;
+        }
+
+        try
+        {
+            _service.DeleteEnrollment(enrollment);
+            _storage.Save(DefaultJsonPath, _service.CreateSnapshot());
+            RefreshCollections();
+            StatusText = "Запис на курс видалено.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка видалення запису");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task ImportJsonAsync()
+    {
+        if (IsBusy) return;
+
+        string path = JsonFilePath.Trim();
+        if (path.Length == 0 || !File.Exists(path))
+        {
+            StatusText = $"Файл «{path}» не знайдено. Вкажіть шлях, наприклад backup.json або data\\broken_syntax.json.";
+            return;
+        }
+
+        if (!await AskAsync($"Завантажити дані з файлу {path}?\n\n" +
+                            $"Поточні дані ({_service.Students.Count} здобувачів) буде замінено, якщо файл коректний. " +
+                            "Якщо файл пошкоджений, поточні дані не зміняться."))
+        {
+            StatusText = "Імпорт скасовано.";
+            return;
+        }
+
+        IsBusy = true;
+        ProgressValue = 10;
+        StatusText = $"Імпорт із {path}...";
+
+        try
+        {
+            var data = await Task.Run(() => _storage.Load(path));
+            _service.ReplaceAll(data);
+            var snapshot = _service.CreateSnapshot();
+            await Task.Run(() => _storage.Save(DefaultJsonPath, snapshot));
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                ProgressValue = 100;
+                RefreshCollections();
+                StatusText = $"Імпортовано {data.Enrollments.Count} записів із {path}.";
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка імпорту JSON з {Path}", path);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                ProgressValue = 0;
+                StatusText = $"Помилка імпорту: {ex.Message} Поточні дані не змінено.";
+            });
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ExportJsonAsync()
+    {
+        if (IsBusy) return;
+
+        // Експорт у файл із поля шляху, наприклад backup.json або D:\копія\курси.json.
+        string path = JsonFilePath.Trim();
+        if (path.Length == 0)
+        {
+            StatusText = "Вкажіть у полі шлях до файлу для експорту, наприклад backup.json.";
+            return;
+        }
+        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            path += ".json";
+
+        IsBusy = true;
+        try
+        {
+            var snapshot = _service.CreateSnapshot();
+            await Task.Run(() => _storage.Save(path, snapshot));
+            StatusText = $"Експортовано {snapshot.Enrollments.Count} записів у {Path.GetFullPath(path)}.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Помилка експорту JSON");
+            StatusText = $"Помилка експорту: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task GenerateLargeDatasetAsync()
+    {
+        if (IsBusy) return;
+
+        if (!await AskAsync("Згенерувати великий набір на 15 000 оцінок (понад 2000 здобувачів, частина з боргами)?\n\n" +
+                            $"Поточні дані ({_service.Students.Count} здобувачів) буде замінено і перезаписано в courses.json. " +
+                            "Щоб їх зберегти, спочатку зробіть «Експорт JSON», наприклад у backup.json. " +
+                            "Повернутися до 100 здобувачів можна кнопкою «Стартовий набір»."))
+        {
+            StatusText = "Генерацію скасовано.";
+            return;
+        }
+
+        await ReplaceWithGeneratedAsync("Генерація 15 000 оцінок...",
+            () => _generator.Generate(15_000, leaveDebts: true));
+    }
+
+    [RelayCommand]
+    private async Task ResetStartDataAsync()
+    {
+        if (IsBusy) return;
+
+        if (!await AskAsync($"Повернути стартовий набір ({StartStudents} здобувачів, частина робіт ще не оцінена)?\n\n" +
+                            $"Поточні дані ({_service.Students.Count} здобувачів) буде замінено і перезаписано в courses.json."))
+        {
+            StatusText = "Повернення стартового набору скасовано.";
+            return;
+        }
+
+        await ReplaceWithGeneratedAsync("Створення стартового набору...",
+            () => _generator.GenerateStartSet(StartStudents));
+    }
+
+    private async Task ReplaceWithGeneratedAsync(string busyText, Func<StorageData> generate)
+    {
+        IsBusy = true;
+        ProgressValue = 15;
+        StatusText = busyText;
+
+        try
+        {
+            var data = await Task.Run(generate);
+            _service.ReplaceAll(data);
+            await Task.Run(() => _storage.Save(DefaultJsonPath, data));
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                ProgressValue = 100;
+                RefreshCollections();
+                int grades = data.Enrollments.Sum(e => e.Grades.Count);
+                int debtors = data.Enrollments.Count(e => e.NextActivity != null);
+                StatusText = $"Згенеровано {data.Enrollments.Count} записів ({grades:N0} оцінок), " +
+                             $"з них {debtors} мають не здані роботи.";
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Помилка генерації великого набору");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task RunBenchmarkAndXmlAsync()
+    {
+        if (IsBusy) return;
+        IsBusy = true;
+        ProgressValue = 0;
+        _cts = new CancellationTokenSource();
+        StatusText = "Виконується розрахунок T1 / Tn...";
+
+        var progress = new Progress<double>(p =>
+            Dispatcher.UIThread.InvokeAsync(() => ProgressValue = Math.Round(p * 100, 1)));
+
+        try
+        {
+            var result = await _service.CalculateRatingsBenchmarkAsync(progress, _cts.Token);
+            var enrollments = _service.CreateSnapshot().Enrollments;
+            await Task.Run(() => _xmlExporter.Export(DefaultXmlPath, result.Ratings, enrollments), _cts.Token);
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                ProgressValue = 100;
+                StatusText = $"Оцінок: {result.GradesProcessed} | T1={result.SingleThreadMs:F2} мс | " +
+                             $"Tn({result.ThreadCount})={result.MultiThreadMs:F2} мс | S={result.Speedup:F2}x | XML: {DefaultXmlPath}";
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Розрахунок скасовано користувачем.";
+            ProgressValue = 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Помилка розрахунку рейтингу");
+            StatusText = $"Помилка: {ex.Message}";
+        }
+        finally
+        {
+            _cts?.Dispose();
+            _cts = null;
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void CancelOperation()
+    {
+        _cts?.Cancel();
+    }
+
+    private void RefreshCollections()
+    {
+        // Clear() скидає вибір у випадних списках, тому запам'ятовуємо його і повертаємо, якщо об'єкт лишився.
+        var keepCourse = SelectedCourse;
+        var keepStudent = SelectedStudent;
+
+        Courses.Clear();
+        foreach (var c in _service.Courses) Courses.Add(c);
+
+        Students.Clear();
+        foreach (var s in _service.Students) Students.Add(s);
+
+        SelectedCourse = keepCourse != null && Courses.Contains(keepCourse) ? keepCourse : null;
+        SelectedStudent = keepStudent != null && Students.Contains(keepStudent) ? keepStudent : null;
+
+        // Оновлюємо список груп без Clear(), щоб обраний фільтр не скидався без потреби.
+        var groups = _service.Students.Select(s => s.Group).Distinct().OrderBy(g => g).ToList();
+        foreach (var old in GroupFilters.Skip(1).Where(g => !groups.Contains(g)).ToList())
+            GroupFilters.Remove(old);
+        foreach (var g in groups.Where(g => !GroupFilters.Contains(g)))
+            GroupFilters.Add(g);
+        if (!GroupFilters.Contains(SelectedGroupFilter))
+            SelectedGroupFilter = "Усі";
+
+        RefreshView();
+    }
+
+    private void RefreshView()
+    {
+        IEnumerable<Enrollment> query = _service.Enrollments;
+
+        if (!string.IsNullOrWhiteSpace(SearchQuery))
+        {
+            string q = SearchQuery.Trim();
+            query = query.Where(e =>
+                e.Student.FullName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                e.Course.Title.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                e.Course.Code.Contains(q, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (SelectedGroupFilter != "Усі")
+        {
+            query = query.Where(e => e.Student.Group.Equals(SelectedGroupFilter, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (SelectedActivityFilter != "Усі")
+        {
+            query = query.Where(e => e.NextActivityType == SelectedActivityFilter);
+        }
+
+        query = SelectedSortMode switch
+        {
+            "Рейтинг (зростання)" => query.OrderBy(e => e.TotalRating),
+            "Наступний дедлайн" => query.OrderBy(e => e.NextDeadline).ThenBy(e => e.Student.FullName),
+            _ => query.OrderByDescending(e => e.TotalRating)
+        };
+
+        // Таблиця перезаповнюється, тому обраний рядок запам'ятовуємо й повертаємо, якщо він лишився у вибірці.
+        var keep = SelectedEnrollment;
+        var matched = query.ToList();
+        _restoringSelection = true;
+        try
+        {
+            FilteredEnrollments.Clear();
+            foreach (var item in matched.Take(MaxRows))
+            {
+                FilteredEnrollments.Add(item);
+            }
+
+            // Якщо рядок зник (видалено або відфільтровано) – знімаємо вибір, щоб не виставити оцінку «невидимому» запису.
+            SelectedEnrollment = keep != null && FilteredEnrollments.Contains(keep) ? keep : null;
+        }
+        finally
+        {
+            _restoringSelection = false;
+        }
+        UpdateGradeHint();
+
+        ShownInfo = matched.Count > MaxRows
+            ? $"Показано {MaxRows} з {matched.Count} (уточніть пошук)"
+            : $"Записів: {matched.Count}";
+    }
+
+    // Більше рядків DataGrid показує повільно, а для роботи достатньо пошуку й фільтрів.
+    private const int MaxRows = 500;
+    private bool _restoringSelection;
+}
+
+// ===================== Views/MainWindow.axaml =====================
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:CourseManager.ViewModels"
+        xmlns:m="using:CourseManager.Models"
+        x:Class="CourseManager.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="Система управління навчальними курсами"
+        Width="1360" Height="780"
+        MinWidth="1280" MinHeight="620">
+
+    <Grid RowDefinitions="Auto,*,Auto" Margin="12">
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBox Width="210" Margin="0,0,8,4"
+                     PlaceholderText="Пошук за ПІБ або курсом..."
+                     Text="{Binding SearchQuery}" />
+            <ComboBox Width="115" Margin="0,0,8,4"
+                      ItemsSource="{Binding GroupFilters}"
+                      SelectedItem="{Binding SelectedGroupFilter}" />
+            <ComboBox Width="135" Margin="0,0,8,4"
+                      ToolTip.Tip="Фільтр за типом наступної невиконаної роботи"
+                      ItemsSource="{Binding ActivityFilters}"
+                      SelectedItem="{Binding SelectedActivityFilter}" />
+            <ComboBox Width="185" Margin="0,0,8,4"
+                      ItemsSource="{Binding SortModes}"
+                      SelectedItem="{Binding SelectedSortMode}" />
+            <TextBox Width="165" Margin="0,0,6,4"
+                     PlaceholderText="Шлях до JSON..."
+                     ToolTip.Tip="Файл для імпорту та експорту, наприклад backup.json або data\broken_syntax.json"
+                     Text="{Binding JsonFilePath}" />
+            <Button Content="Імпорт JSON" Margin="0,0,6,4" Command="{Binding ImportJsonCommand}" />
+            <Button Content="Експорт JSON" Margin="0,0,6,4" Command="{Binding ExportJsonCommand}" />
+            <Button Content="15 000 оцінок" Margin="0,0,6,4" Command="{Binding GenerateLargeDatasetCommand}"
+                    ToolTip.Tip="Великий набір для замірів T1/Tn" />
+            <Button Content="Стартовий набір" Margin="0,0,6,4" Command="{Binding ResetStartDataCommand}"
+                    ToolTip.Tip="Повернути 100 здобувачів зі стартовими даними" />
+            <Button Content="Рейтинг T1/Tn + XML" Margin="0,0,6,4" Command="{Binding RunBenchmarkAndXmlCommand}" />
+            <Button Content="Скасувати" Margin="0,0,0,4" Command="{Binding CancelOperationCommand}" />
+        </WrapPanel>
+
+        <Grid Grid.Row="1" ColumnDefinitions="*,330">
+            <DataGrid Grid.Column="0"
+                      ItemsSource="{Binding FilteredEnrollments}"
+                      SelectedItem="{Binding SelectedEnrollment}"
+                      IsReadOnly="True"
+                      AutoGenerateColumns="False"
+                      GridLinesVisibility="All"
+                      Margin="0,0,12,0">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Здобувач" Binding="{Binding Student.FullName}" Width="*" MinWidth="175" />
+                    <DataGridTextColumn Header="Група" Binding="{Binding Student.Group}" Width="76" />
+                    <DataGridTextColumn Header="Код" Binding="{Binding Course.Code}" Width="92" />
+                    <DataGridTextColumn Header="Курс" Binding="{Binding Course.Title}" Width="*" MinWidth="80" />
+                    <DataGridTextColumn Header="Наступна робота" Binding="{Binding NextActivityText}" Width="140" />
+                    <DataGridTextColumn Header="Дедлайн" Binding="{Binding NextDeadlineText}" Width="165" />
+                    <DataGridTextColumn Header="Бали" Binding="{Binding TotalRating}" Width="66" />
+                    <DataGridTextColumn Header="Оцінка" Binding="{Binding NationalGrade}" Width="120" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <ScrollViewer Grid.Column="1">
+                <StackPanel Spacing="8" Margin="0,0,14,0">
+                    <TextBlock Text="Керування курсами" FontWeight="Bold" />
+                    <ComboBox ItemsSource="{Binding Courses}" SelectedItem="{Binding SelectedCourse}"
+                              PlaceholderText="Оберіть курс або введіть код нижче" HorizontalAlignment="Stretch">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="m:Course">
+                                <TextBlock Text="{Binding DisplayName}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBox PlaceholderText="Код (напр. CS-101)" Text="{Binding NewCourseCode}" />
+                    <TextBox PlaceholderText="Назва курсу" Text="{Binding NewCourseTitle}" />
+                    <TextBox PlaceholderText="Викладач" Text="{Binding NewCourseInstructor}" />
+                    <UniformGrid Columns="3">
+                        <Button Content="Додати" Command="{Binding AddCourseCommand}" Margin="0,0,4,0" HorizontalAlignment="Stretch" />
+                        <Button Content="Оновити" Command="{Binding UpdateCourseCommand}" Margin="0,0,4,0" HorizontalAlignment="Stretch" />
+                        <Button Content="Видалити" Command="{Binding DeleteCourseCommand}" HorizontalAlignment="Stretch" />
+                    </UniformGrid>
+
+                    <Separator />
+                    <TextBlock Text="Керування здобувачами" FontWeight="Bold" />
+                    <ComboBox ItemsSource="{Binding Students}" SelectedItem="{Binding SelectedStudent}"
+                              PlaceholderText="Оберіть здобувача або введіть ПІБ нижче" HorizontalAlignment="Stretch">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="m:Student">
+                                <TextBlock Text="{Binding DisplayName}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBox PlaceholderText="ПІБ здобувача" Text="{Binding NewStudentName}" />
+                    <TextBox PlaceholderText="Група (напр. 3РП-11)" Text="{Binding NewStudentGroup}" />
+                    <UniformGrid Columns="3">
+                        <Button Content="Додати" Command="{Binding AddStudentCommand}" Margin="0,0,4,0" HorizontalAlignment="Stretch" />
+                        <Button Content="Оновити" Command="{Binding UpdateStudentCommand}" Margin="0,0,4,0" HorizontalAlignment="Stretch" />
+                        <Button Content="Видалити" Command="{Binding DeleteStudentCommand}" HorizontalAlignment="Stretch" />
+                    </UniformGrid>
+
+                    <Separator />
+                    <TextBlock Text="Запис на курс і оцінки" FontWeight="Bold" />
+                    <UniformGrid Columns="2">
+                        <Button Content="Записати" Command="{Binding EnrollSelectedCommand}" Margin="0,0,4,0" HorizontalAlignment="Stretch" />
+                        <Button Content="Видалити запис" Command="{Binding DeleteSelectedEnrollmentCommand}" HorizontalAlignment="Stretch" />
+                    </UniformGrid>
+                    <TextBlock Text="{Binding GradeHint}" TextWrapping="Wrap" Foreground="#5A6270" />
+                    <ComboBox ItemsSource="{Binding SelectedEnrollmentActivities}" SelectedItem="{Binding SelectedActivity}"
+                              PlaceholderText="Спершу оберіть рядок у таблиці" HorizontalAlignment="Stretch" />
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBox Grid.Column="0" PlaceholderText="Бал" Text="{Binding GradeRawScoreText}" Margin="0,0,8,0" />
+                        <CheckBox Grid.Column="1" Content="Запізн." IsChecked="{Binding GradeIsLate}" />
+                    </Grid>
+                    <Button Content="Виставити оцінку" Command="{Binding AddGradeToSelectedCommand}" HorizontalAlignment="Stretch" />
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
+        <Grid Grid.Row="2" ColumnDefinitions="*,Auto,220" Margin="0,10,0,0">
+            <TextBlock Grid.Column="0" Text="{Binding StatusText}" TextWrapping="Wrap" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="{Binding ShownInfo}" Foreground="#5A6270" Margin="12,0" VerticalAlignment="Center" />
+            <ProgressBar Grid.Column="2" Minimum="0" Maximum="100" Value="{Binding ProgressValue}" Height="18" />
+        </Grid>
+    </Grid>
+</Window>
+
+// ===================== Views/MainWindow.axaml.cs =====================
+using Avalonia.Controls;
+using CourseManager.ViewModels;
+
+namespace CourseManager.Views;
+
+public partial class MainWindow : Window
+{
+    public MainWindow()
+    {
+        InitializeComponent();
+    }
+
+    // ViewModel не знає про вікна, тому показ діалогу підтвердження передається їй звідси.
+    protected override void OnDataContextChanged(EventArgs e)
+    {
+        base.OnDataContextChanged(e);
+        if (DataContext is MainWindowViewModel vm)
+            vm.Confirm = message => ConfirmDialog.ShowAsync(this, message);
+    }
+}
+
+// ===================== Views/ConfirmDialog.cs =====================
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Layout;
+using Avalonia.Media;
+
+namespace CourseManager.Views;
+
+public sealed class ConfirmDialog : Window
+{
+    private ConfirmDialog(string message)
+    {
+        Title = "Підтвердження";
+        Width = 440;
+        SizeToContent = SizeToContent.Height;
+        CanResize = false;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+
+        var yes = new Button { Content = "Так", MinWidth = 100, HorizontalContentAlignment = HorizontalAlignment.Center };
+        var no = new Button { Content = "Скасувати", MinWidth = 100, IsCancel = true, HorizontalContentAlignment = HorizontalAlignment.Center };
+        yes.Click += (_, _) => Close(true);
+        no.Click += (_, _) => Close(false);
+
+        Content = new StackPanel
+        {
+            Margin = new Thickness(20),
+            Spacing = 18,
+            Children =
+            {
+                new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
+                new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Spacing = 8,
+                    Children = { no, yes }
+                }
+            }
+        };
+    }
+
+    // Повертає true лише при натисканні «Так».
+    public static Task<bool> ShowAsync(Window owner, string message) =>
+        new ConfirmDialog(message).ShowDialog<bool>(owner);
+}
+
+// ===================== App.axaml =====================
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="CourseManager.App"
+             RequestedThemeVariant="Light">
+    <Application.Styles>
+        <FluentTheme />
+        <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+    </Application.Styles>
+</Application>
+
+// ===================== App.axaml.cs =====================
+using Avalonia;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Markup.Xaml;
+using CourseManager.Views;
+using CourseManager.ViewModels;
+
+namespace CourseManager;
+
+public partial class App : Application
+{
+    public override void Initialize()
+    {
+        AvaloniaXamlLoader.Load(this);
+    }
+
+    public override void OnFrameworkInitializationCompleted()
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.MainWindow = new MainWindow
+            {
+                DataContext = new MainWindowViewModel()
+            };
+        }
+
+        base.OnFrameworkInitializationCompleted();
+    }
+}
+
+// ===================== Program.cs =====================
+using Avalonia;
+using Serilog;
+
+namespace CourseManager;
+
+internal sealed class Program
+{
+    [STAThread]
+    public static void Main(string[] args)
+    {
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Information()
+            .WriteTo.File("app.log", rollingInterval: RollingInterval.Day)
+            .CreateLogger();
+
+        try
+        {
+            Log.Information("Запуск застосунку CourseManager");
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        }
+        catch (Exception ex)
+        {
+            Log.Fatal(ex, "Критична помилка під час роботи застосунку");
+            throw;
+        }
+        finally
+        {
+            Log.CloseAndFlush();
+        }
+    }
+
+    public static AppBuilder BuildAvaloniaApp() =>
+        AppBuilder.Configure<App>()
+            .UsePlatformDetect()
+            .WithInterFont()
+            .LogToTrace();
+}
+
+// ===================== CourseManager.csproj =====================
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.0" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.0.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.0" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.0" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.0.0" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Serilog" Version="4.2.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+    <!-- Avalonia тягне Tmds.DBus.Protocol 0.90.3 з відомою вразливістю (GHSA-xrw6-gwf8-vvr9, NU1903); 0.92.0 – виправлена версія. -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.92.0" />
+  </ItemGroup>
+</Project>
